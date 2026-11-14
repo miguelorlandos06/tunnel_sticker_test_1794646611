@@ -1,0 +1,30 @@
+name: Tunnel server (Kamikaze)
+on: [workflow_dispatch]
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install requests cryptography zstandard
+      - name: Arrancar servidor
+        env:
+          CHAN: ${{ secrets.TUNNEL_CHAN }}
+          PSK:  ${{ secrets.TUNNEL_PSK }}
+        run: |
+          python3 - <<PYEOF
+          import json, os
+          json.dump({"todus_relay": {
+            "s3_base": "https://s3.todus.cu", "bucket": "stickers",
+            "chan": os.environ["CHAN"], "psk": os.environ["PSK"],
+            "chunk_kb": 64, "poll_ms": 40, "workers": 32, "inflight": 64,
+            "gc_hours": 24, "compress": True, "dial_timeout_s": 12, "idle_timeout_s": 600, "blocked_hosts": []
+          }}, open("config.server.json","w"))
+          PYEOF
+          python3 server.py --config config.server.json --verbose &
+          PID=$!
+          echo "✅ Servidor Kamikaze vivo PID=$PID — listo para conectar"
+          for i in $(seq 1 55); do sleep 60; kill -0 $PID 2>/dev/null || { echo "❌ Murió en minuto $i"; exit 1; }; echo "Minuto $i: vivo"; done
+          kill $PID

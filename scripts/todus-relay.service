@@ -1,0 +1,13 @@
+[Unit]
+Description=tunnel_sticker server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tunnel_sticker
+ExecStart=/usr/bin/python3 /opt/tunnel_sticker/server.py --config /opt/tunnel_sticker/config.server.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

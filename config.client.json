@@ -1,0 +1,15 @@
+{
+  "todus_relay": {
+    "s3_base": "https://s3.todus.cu",
+    "bucket": "stickers",
+    "chan": "eded311cd9ad19d0",
+    "psk": "YyHO6lYLUpfUDaTClxYe2cTmEKv1Cd3vX-B1oFFf8wU",
+    "chunk_kb": 64,
+    "poll_ms": 40,
+    "workers": 32,
+    "inflight": 64,
+    "gc_hours": 24,
+    "compress": true,
+    "listen": "127.0.0.1:1080"
+  }
+}
