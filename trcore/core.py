@@ -1,4 +1,4 @@
-"""Motor del tunel asincrono (aiohttp)."""
+"""Motor del tunel asincrono (aiohttp) Estable y Rápido."""
 import datetime, logging, asyncio, time
 from .crypto import CryptoError
 from .compress import compress, decompress
@@ -51,44 +51,48 @@ class Relay:
             finally:
                 if conn: conn.inflight.release()
 
-    async def poll(self) -> int:
-        keys = await self.s3.list(self.in_side, start_after=self.wm)
-        n = 0
-        for it in keys:
-            k = it["key"]
-            blob = await self.s3.get(k)
+    async def _process_object(self, k):
+        blob = await self.s3.get(k)
+        if blob:
             self.stats["gets"] += 1
-            if blob:
-                self.stats["down_bytes"] += max(0, len(blob) - 31)
-                try: mtype, body = self.crypto.unseal(blob, k)
-                except CryptoError: 
-                    await self.s3.delete(k); self.wm = k; continue
-                if self.cfg.compress:
-                    try: body = decompress(body)
-                    except Exception: 
-                        await self.s3.delete(k); self.wm = k; continue
+            self.stats["down_bytes"] += max(0, len(blob) - 31)
+            try: 
+                mtype, body = self.crypto.unseal(blob, k)
+                if self.cfg.compress: body = decompress(body)
                 if mtype == T_FIN and b"\"hb\"" in body: 
                     pass
                 else:
-                    try: await self.dispatch(mtype, body, k)
-                    except Exception: pass
-            await self.s3.delete(k)
-            self.wm = k
-            n += 1
-        return n
+                    await self.dispatch(mtype, body, k)
+            except Exception: pass
+        await self.s3.delete(k)
+
+    async def poll(self) -> int:
+        keys = await self.s3.list(self.in_side, start_after=self.wm)
+        if not keys:
+            return 0
+            
+        # Procesar los objetos en paralelo usando asyncio.gather (Mucho más rápido)
+        tasks = []
+        for it in keys:
+            tasks.append(self._process_object(it["key"]))
+            self.wm = it["key"]
+            
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return len(keys)
 
     async def poll_loop(self, poll_ms: int):
-        base_wait = max(0.001, poll_ms / 1000.0)
+        base_wait = max(0.005, poll_ms / 1000.0)
         current_wait = base_wait
         while self.running:
             try:
                 if await self.poll() > 0:
                     current_wait = base_wait
-                    await asyncio.sleep(0.001)
+                    await asyncio.sleep(0.001) # Vuela si hay datos
                 else:
                     await asyncio.sleep(current_wait)
-                    current_wait = min(current_wait * 1.5, 0.5)
-            except Exception:
+                    current_wait = min(current_wait * 1.5, 0.5) # Max 500ms en reposo
+            except Exception as e:
+                log.debug("Poll error: %s", e)
                 await asyncio.sleep(0.1)
 
     def register_conn(self, conn: Conn):
