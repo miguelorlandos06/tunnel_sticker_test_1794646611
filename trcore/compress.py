@@ -2,11 +2,7 @@
 Flag en primer byte: 0x00=sin, 0x01=zlib, 0x02=zstd.
 """
 import zlib
-try:
-    import zstandard as _zstd
-    _HAS_ZSTD = True
-except ImportError:
-    _HAS_ZSTD = False
+_HAS_ZSTD = False
 
 MIN_SIZE = 256
 LEVEL_ZSTD = 3

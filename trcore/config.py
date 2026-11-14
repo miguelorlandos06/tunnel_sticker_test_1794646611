@@ -44,12 +44,12 @@ class Config:
             raise ValueError("psk demasiado corta: usa 32+ caracteres")
         if not (8 <= cfg.chunk_kb <= 4096):
             raise ValueError("chunk_kb fuera de rango (8..4096)")
-        if not (1 <= cfg.workers <= 16):
+        if not (1 <= cfg.workers <= 64):
             raise ValueError("workers fuera de rango (1..16)")
-        if not (1 <= cfg.inflight <= 32):
+        if not (1 <= cfg.inflight <= 128):
             raise ValueError("inflight fuera de rango (1..32)")
-        if not (128 <= cfg.poll_ms <= 5000):
-            raise ValueError("poll_ms fuera de rango (128..5000)")
+        if not (10 <= cfg.poll_ms <= 5000):
+            raise ValueError("poll_ms fuera de rango (10..5000)")
         return cfg
 
     def listen_addr(self):
