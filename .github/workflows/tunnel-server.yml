@@ -29,7 +29,7 @@ jobs:
           python3 - <<PYEOF
           import json, os
           json.dump({"todus_relay": {
-            "s3_base": "https://s3.todus.cu", "bucket": "stream",
+            "s3_base": "https://s3.todus.cu", "bucket": "stickers",
             "chan": os.environ["CHAN"], "psk": os.environ["PSK"],
             "chunk_kb": 256, "poll_ms": 50, "workers": 8, "inflight": 64,
             "gc_hours": 24, "compress": True,
