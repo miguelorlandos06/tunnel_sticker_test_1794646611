@@ -6,12 +6,13 @@ const https = require("https");
 
 const config = JSON.parse(fs.readFileSync("config.server.json", "utf8")).todus_relay;
 const bucket = config.bucket;
+const chan = config.chan;
 const psk = config.psk;
 const poll_ms = config.poll_ms || 50;
 const chunkKb = config.chunk_kb || 256;
 
-function deriveKey(chan) {
-    const salt = Buffer.from(`todus-relay|${chan}`);
+function deriveKey(c) {
+    const salt = Buffer.from(`todus-relay|${c}`);
     return crypto.hkdfSync("sha256", Buffer.from(psk), salt, Buffer.from("todus-relay/v1/aesgcm"), 32);
 }
 
@@ -141,7 +142,10 @@ async function pollChannel(chanCtx) {
                 if (blob) {
                     const { mtype, body } = unseal(chanCtx.key, blob, k);
                     const raw = decompress(body);
-                    const connId = k.split("/")[2];
+                    
+                    // Extracción robusta del connId
+                    const parts = k.split("/");
+                    const connId = parts.length >= 5 ? parts[3] : parts[2];
                     
                     if (mtype === 1) {
                         const d = JSON.parse(raw.toString());
@@ -170,16 +174,25 @@ async function pollChannel(chanCtx) {
 }
 
 async function scanChannels() {
+    // Arranque inicial: siempre pollear el canal del config
+    if (!activeChannels.has(chan)) {
+        console.log(`[+] Canal del config: ${chan}`);
+        const chanCtx = { chan: chan, key: deriveKey(chan), wm: null, conns: new Map() };
+        activeChannels.set(chan, chanCtx);
+        pollChannel(chanCtx);
+    }
+
+    // Descubrimiento dinámico vía registro/activos.json
     try {
         const res = await s3Request("GET", "registro/activos.json");
         if (res.status === 200) {
             const data = JSON.parse(res.body.toString());
             const canales = data.canales || [];
-            for (const chan of canales) {
-                if (!activeChannels.has(chan)) {
-                    console.log(`[+] Nuevo canal detectado: ${chan}`);
-                    const chanCtx = { chan, key: deriveKey(chan), wm: null, conns: new Map() };
-                    activeChannels.set(chan, chanCtx);
+            for (const c of canales) {
+                if (!activeChannels.has(c)) {
+                    console.log(`[+] Nuevo canal detectado: ${c}`);
+                    const chanCtx = { chan: c, key: deriveKey(c), wm: null, conns: new Map() };
+                    activeChannels.set(c, chanCtx);
                     pollChannel(chanCtx);
                 }
             }
@@ -188,7 +201,7 @@ async function scanChannels() {
     setTimeout(scanChannels, 30000);
 }
 
-console.log("Servidor Node.js Multi-Canal activo (alineado con APK)");
+console.log("Servidor Node.js Multi-Canal activo (bucket: " + bucket + ")");
 scanChannels();
 
 setInterval(() => {
