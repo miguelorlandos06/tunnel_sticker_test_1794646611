@@ -4,7 +4,7 @@
     "bucket": "stickers",
     "chan": "eded311cd9ad19d0",
     "psk": "YyHO6lYLUpfUDaTClxYe2cTmEKv1Cd3vX-B1oFFf8wU",
-    "chunk_kb": 64,
+    "chunk_kb": 32,
     "poll_ms": 10,
     "workers": 50,
     "inflight": 100,
