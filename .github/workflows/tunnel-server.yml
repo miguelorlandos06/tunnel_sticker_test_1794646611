@@ -1,24 +1,22 @@
-name: Tunnel Server (Auto-Renew)
+name: Tunnel Server (Node.js Auto-Renew)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */5 * * *" # Respaldo por si falla la auto-renovación (cada 5 horas)
+    - cron: "0 */5 * * *"
 
 jobs:
   server:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # 5 horas y 50 minutos (margen de seguridad antes del corte de 6h)
+    timeout-minutes: 350
     steps:
       - name: Detener ejecuciones anteriores
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          # Busca ejecuciones en progreso de este mismo workflow y las cancela
           gh run list --workflow=tunnel-server.yml --status=in_progress --json databaseId -q ".[].databaseId" | xargs -r -n 1 gh run cancel -R ${{ github.repository }} || true
 
       - uses: actions/checkout@v4
-      
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -26,9 +24,8 @@ jobs:
       - name: Arrancar servidor Node.js
         env:
           CHAN: ${{ secrets.TUNNEL_CHAN }}
-          PSK: ${{ secrets.TUNNEL_PSK }}
+          PSK:  ${{ secrets.TUNNEL_PSK }}
         run: |
-          # Generar config
           python3 - <<PYEOF
           import json, os
           json.dump({"todus_relay": {
@@ -40,22 +37,15 @@ jobs:
           }}, open("config.server.json","w"))
           PYEOF
           
-          # Arrancar el servidor en segundo plano
           node server.js &
           SERVER_PID=$!
-          
-          echo "✅ Servidor vivo (PID: $SERVER_PID). Durmiendo por 5h 30m..."
-          
-          # Dormir 19800 segundos (5.5 horas)
+          echo "✅ Servidor Node.js vivo. Durmiendo 5h 30m..."
           sleep 19800
-          
-          echo "⏰ Tiempo cumplido. Deteniendo servidor..."
           kill $SERVER_PID
 
       - name: Relanzar automáticamente
-        if: always() # Se ejecuta incluso si el workflow es cancelado o falla
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          echo "🔄 Relanzando el workflow para mantener el túnel vivo..."
           gh workflow run tunnel-server.yml -R ${{ github.repository }}

@@ -4,23 +4,20 @@ const net = require("net");
 const fs = require("fs");
 const https = require("https");
 
-// --- Configuración ---
 const config = JSON.parse(fs.readFileSync("config.server.json", "utf8")).todus_relay;
 const bucket = config.bucket;
 const psk = config.psk;
 const poll_ms = config.poll_ms || 50;
 const chunkKb = config.chunk_kb || 256;
-const maxInflight = config.inflight || 64;
 
 function deriveKey(chan) {
     const salt = Buffer.from(`todus-relay|${chan}`);
     return crypto.hkdfSync("sha256", Buffer.from(psk), salt, Buffer.from("todus-relay/v1/aesgcm"), 32);
 }
 
-const activeChannels = new Map(); // chan -> { key, wm, conns: Map }
+const activeChannels = new Map();
 const stats = { puts: 0, gets: 0, start: Date.now() };
 
-// --- S3 Helpers ---
 function s3Request(method, keyPath, body = null, query = "") {
     return new Promise((resolve, reject) => {
         const path = keyPath ? `/${bucket}/${keyPath}${query}` : `/${bucket}/${query}`;
@@ -61,7 +58,6 @@ async function s3List(prefix, startAfter = null) {
 }
 async function s3Delete(keyPath) { await s3Request("DELETE", keyPath); }
 
-// --- Cifrado y Compresión ---
 const MAGIC = Buffer.from("TR1");
 function seal(key, seq, path, mtype, body) {
     const nonce = Buffer.alloc(12);
@@ -96,7 +92,6 @@ function decompress(buf) {
     return data;
 }
 
-// --- Lógica de Conexión (por canal) ---
 async function sendConn(chanCtx, conn, mtype, body) {
     const compressed = compress(body);
     const seq = conn.seq++;
@@ -113,7 +108,6 @@ async function dial(chanCtx, connId, host, port) {
             console.log(`[${chanCtx.chan}] conn ${connId} conectada a ${host}:${port}`);
             
             sock.on("data", async (data) => {
-                // Partir los datos en chunks del tamaño configurado (256 KB)
                 for (let i = 0; i < data.length; i += chunkKb * 1024) {
                     const chunk = data.slice(i, i + chunkKb * 1024);
                     await sendConn(chanCtx, conn, 2, chunk);
@@ -134,7 +128,6 @@ async function dial(chanCtx, connId, host, port) {
     });
 }
 
-// --- Polling por Canal ---
 async function pollChannel(chanCtx) {
     try {
         const keys = await s3List(`${chanCtx.chan}/c/`, chanCtx.wm);
@@ -176,14 +169,12 @@ async function pollChannel(chanCtx) {
     }
 }
 
-// --- Escáner de Nuevos Canales ---
 async function scanChannels() {
     try {
         const res = await s3Request("GET", "registro/activos.json");
         if (res.status === 200) {
             const data = JSON.parse(res.body.toString());
             const canales = data.canales || [];
-            
             for (const chan of canales) {
                 if (!activeChannels.has(chan)) {
                     console.log(`[+] Nuevo canal detectado: ${chan}`);
@@ -197,7 +188,6 @@ async function scanChannels() {
     setTimeout(scanChannels, 30000);
 }
 
-// --- Iniciar ---
 console.log("Servidor Node.js Multi-Canal activo (alineado con APK)");
 scanChannels();
 
