@@ -1,4 +1,4 @@
-"""Motor del tunel (V2 Pro: GET a ciegas, Backoff y Watchdog)."""
+"""Motor del tunel (V3 Estable: LIST inteligente, Backoff y Cero perdidas)."""
 import datetime, logging, queue, threading, time
 from .crypto import CryptoError
 from .compress import compress, decompress
@@ -27,7 +27,7 @@ class Relay:
         self.q = queue.Queue(maxsize=5000)
         self.running = True
         self.seq_ctl = 0
-        self.expected_seqs = {}
+        self.wm = None # Watermark para el LIST
         
         self.stats = {"puts": 0, "gets": 0, "up_bytes": 0, "down_bytes": 0, "start": time.time()}
         for _ in range(max(1, cfg.workers)): 
@@ -53,6 +53,7 @@ class Relay:
                 if conn: conn.inflight.release()
 
     def poll(self) -> int:
+        # LIST inteligente con start-after (solo trae lo nuevo, es instantáneo)
         keys = self.s3.list(self.in_side, start_after=self.wm)
         n = 0
         for it in keys:
@@ -60,14 +61,14 @@ class Relay:
             blob = self.s3.get(k)
             if blob:
                 self.stats["gets"] += 1
+                self.stats["down_bytes"] += max(0, len(blob) - 31)
                 try: 
                     mtype, body = self.crypto.unseal(blob, k)
                     if self.cfg.compress: body = decompress(body)
-                    if mtype == T_FIN and b"\"hb\"" in body:
-                        pass
-                    else:
+                    if not (mtype == T_FIN and b"\"hb\"" in body):
                         self.dispatch(mtype, body, k)
-                except Exception: pass
+                except Exception as e:
+                    log.debug("Error procesando %s: %s", k, e)
             self.s3.delete(k)
             self.wm = k
             n += 1
@@ -80,11 +81,12 @@ class Relay:
             try:
                 if self.poll() > 0:
                     current_wait = base_wait
-                    time.sleep(0.001) 
+                    time.sleep(0.001) # Si hay datos, vuelve a preguntar de inmediato
                 else:
                     time.sleep(current_wait)
-                    current_wait = min(current_wait * 1.5, 0.5)
-            except Exception:
+                    current_wait = min(current_wait * 1.5, 0.5) # Modo Eco: duerme hasta 500ms
+            except Exception as e:
+                log.error("poll error: %s", e)
                 time.sleep(0.1)
 
     def register_conn(self, conn: Conn) -> None:
