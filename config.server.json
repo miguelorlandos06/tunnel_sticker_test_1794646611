@@ -4,13 +4,13 @@
     "bucket": "stickers",
     "chan": "eded311cd9ad19d0",
     "psk": "YyHO6lYLUpfUDaTClxYe2cTmEKv1Cd3vX-B1oFFf8wU",
-    "chunk_kb": 32,
-    "poll_ms": 10,
-    "workers": 50,
-    "inflight": 100,
+    "chunk_kb": 256,
+    "poll_ms": 50,
+    "workers": 8,
+    "inflight": 64,
     "gc_hours": 24,
     "compress": true,
-    "dial_timeout_s": 12,
+    "dial_timeout_s": 30,
     "idle_timeout_s": 600,
     "blocked_hosts": []
   }
