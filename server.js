@@ -3,36 +3,40 @@ const zlib = require("zlib");
 const net = require("net");
 const fs = require("fs");
 const https = require("https");
-const { URL } = require("url");
 
 // --- Configuración ---
 const config = JSON.parse(fs.readFileSync("config.server.json", "utf8")).todus_relay;
-const s3Base = new URL(config.s3_base);
 const bucket = config.bucket;
 const chan = config.chan;
 const psk = config.psk;
+const poll_ms = config.poll_ms || 40;
 
-// Derivar clave con HKDF (igual que Python)
+// Derivar clave con HKDF
 const salt = Buffer.from(`todus-relay|${chan}`);
 const key = crypto.hkdfSync("sha256", Buffer.from(psk), salt, Buffer.from("todus-relay/v1/aesgcm"), 32);
 
 const conns = new Map();
 let wm = null;
 let running = true;
-
 const stats = { puts: 0, gets: 0, start: Date.now() };
 
-// --- Utilidades S3 (HTTP nativo sin dependencias) ---
-function s3Request(method, key, body = null, query = "") {
+// --- Peticiones HTTP a S3 (Sin codificar las barras) ---
+function s3Request(method, keyPath, body = null, query = "") {
     return new Promise((resolve, reject) => {
-        const path = `/${bucket}/${key}${query}`;
+        // MinIO en ToDus: la ruta se pasa tal cual, solo codificamos caracteres especiales
+        const path = keyPath ? `/${bucket}/${keyPath}${query}` : `/${bucket}/${query}`;
+        
         const options = {
-            hostname: s3Base.hostname,
+            hostname: "s3.todus.cu",
             port: 443,
-            path: encodeURI(path),
+            path: path,
             method: method,
-            headers: { "User-Agent": "ToDus-Node/1.0", "Accept-Encoding": "identity" }
+            headers: { 
+                "User-Agent": "ToDus-Node/2.0", 
+                "Accept-Encoding": "identity"
+            }
         };
+        
         if (body) options.headers["Content-Length"] = body.length;
 
         const req = https.request(options, (res) => {
@@ -46,23 +50,25 @@ function s3Request(method, key, body = null, query = "") {
     });
 }
 
-async function s3Put(key, data) {
-    await s3Request("PUT", key, data);
+async function s3Put(keyPath, data) {
+    await s3Request("PUT", keyPath, data);
     stats.puts++;
 }
 
-async function s3Get(key) {
-    const res = await s3Request("GET", key);
+async function s3Get(keyPath) {
+    const res = await s3Request("GET", keyPath);
     stats.gets++;
     if (res.status === 200) return res.body;
     if (res.status === 404) return null;
-    throw new Error(`GET ${key} -> ${res.status}`);
+    throw new Error(`GET ${keyPath} -> ${res.status}`);
 }
 
 async function s3List(prefix, startAfter = null) {
-    let query = `?list-type=2&prefix=${encodeURIComponent(prefix)}&max-keys=1000`;
-    if (startAfter) query += `&start-after=${encodeURIComponent(startAfter)}`;
-    const res = await s3Request("GET", "", null, query);
+    // Construimos la query manualmente para no codificar las barras (/) del prefix
+    let query = `?list-type=2&prefix=${prefix}`;
+    if (startAfter) query += `&start-after=${startAfter}`;
+    
+    const res = await s3Request("GET", null, null, query);
     if (res.status !== 200) return [];
     
     const xml = res.body.toString();
@@ -73,13 +79,12 @@ async function s3List(prefix, startAfter = null) {
     return keys;
 }
 
-async function s3Delete(key) {
-    await s3Request("DELETE", key);
+async function s3Delete(keyPath) {
+    await s3Request("DELETE", keyPath);
 }
 
 // --- Cifrado (AES-256-GCM) ---
 const MAGIC = Buffer.from("TR1");
-const HDR = MAGIC.length + 12;
 
 function unseal(blob, path) {
     if (!blob.slice(0, 3).equals(MAGIC)) throw new Error("bad magic");
@@ -105,10 +110,8 @@ function seal(seq, path, mtype, body) {
 function decompress(buf) {
     const flag = buf[0];
     const data = buf.slice(1);
-    if (flag === 0) return data;
     if (flag === 1) return zlib.inflateSync(data); // zlib
-    if (flag === 2) return zlib.brotliDecompressSync(data); // zstd fallback (no soportado nativo, usamos brotli)
-    return data;
+    return data; // flag === 0
 }
 
 function compress(buf) {
@@ -155,7 +158,10 @@ async function poll() {
     if (!running) return;
     try {
         const keys = await s3List(`${chan}/c/`, wm);
+        let found = false;
+        
         for (const k of keys) {
+            found = true;
             const blob = await s3Get(k);
             if (blob) {
                 try {
@@ -173,20 +179,27 @@ async function poll() {
                         const conn = conns.get(connId);
                         if (conn) conn.sock.end();
                     }
-                } catch (e) {}
+                } catch (e) {
+                    console.error("Error al procesar objeto:", e.message);
+                }
             }
             await s3Delete(k);
             wm = k;
         }
-    } catch (e) {}
-    setTimeout(poll, 40);
+        
+        // Si no hay objetos, dormimos. Si los hay, volvemos a preguntar casi inmediatamente.
+        setTimeout(poll, found ? 10 : 40);
+        
+    } catch (e) {
+        console.error("Poll error:", e.message);
+        setTimeout(poll, 500); // En caso de error grave, esperar medio segundo
+    }
 }
 
 // --- Iniciar ---
-console.log("Servidor Node.js activo | canal=" + chan);
+console.log("Servidor Node.js v2 activo | canal=" + chan);
 poll();
 
-// Estadísticas
 setInterval(() => {
     console.log(`stats: puts=${stats.puts} gets=${stats.gets} conns=${conns.size}`);
 }, 30000);
