@@ -1,7 +1,7 @@
 {
   "todus_relay": {
     "s3_base": "https://s3.todus.cu",
-    "bucket": "stickers",
+    "bucket": "stream",
     "chan": "eded311cd9ad19d0",
     "psk": "YyHO6lYLUpfUDaTClxYe2cTmEKv1Cd3vX-B1oFFf8wU",
     "chunk_kb": 256,
