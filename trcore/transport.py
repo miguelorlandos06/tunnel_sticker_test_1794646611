@@ -1,67 +1,58 @@
-"""Cliente S3 asíncrono con aiohttp."""
-import logging
+"""Cliente S3 minimo (Síncrono)."""
+import logging, time, random
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
-import aiohttp
+import requests
+from requests.adapters import HTTPAdapter
 
 log = logging.getLogger("tr.transport")
 _RETRYABLE = {500, 502, 503, 504, 429}
 
-class TransportError(Exception):
-    pass
+class TransportError(Exception): pass
 
 class S3:
     def __init__(self, base: str, bucket: str, user_agent: str = "ToDus Relay/1",
-                 timeout: int = 40, retries: int = 5, **kwargs):
+                 timeout: int = 40, retries: int = 5, pool_maxsize: int = 100):
         self.base = base.rstrip("/")
         self.bucket = bucket
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.timeout = timeout
         self.retries = retries
-        self.headers = {"User-Agent": user_agent, "Accept-Encoding": "identity"}
-        self.session = None
-
-    async def _get_session(self):
-        if self.session is None or self.session.closed:
-            # Límite de conexiones concurrentes
-            conn = aiohttp.TCPConnector(limit=100, force_close=False)
-            self.session = aiohttp.ClientSession(headers=self.headers, connector=conn, timeout=self.timeout)
-        return self.session
+        self.s = requests.Session()
+        self.s.headers.update({"User-Agent": user_agent, "Accept-Encoding": "identity"})
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=pool_maxsize)
+        self.s.mount("https://", adapter)
+        self.s.mount("http://", adapter)
 
     def _url(self, key: str) -> str:
         return f"{self.base}/{self.bucket}/{quote(key)}"
 
-    async def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes) -> None:
         err = ""
-        session = await self._get_session()
         for i in range(self.retries):
             try:
-                async with session.put(self._url(key), data=data) as r:
-                    if r.status in (200, 201): return
-                    err = f"HTTP {r.status}"
-                    if r.status not in _RETRYABLE: raise TransportError(f"PUT {key} -> {err}")
-            except Exception as e:
-                err = repr(e)
-            await aiohttp.helpers.asyncio.sleep(0.01)
+                r = self.s.put(self._url(key), data=data, timeout=self.timeout)
+                if r.status_code in (200, 201): return
+                err = f"HTTP {r.status_code}"
+                if r.status_code not in _RETRYABLE: raise TransportError(f"PUT {key} -> {err}")
+            except requests.RequestException as e: err = repr(e)
+            time.sleep(random.uniform(0.01, 0.05))
         raise TransportError(f"PUT {key} agoto reintentos: {err}")
 
-    async def get(self, key: str):
+    def get(self, key: str):
         err = ""
-        session = await self._get_session()
         for i in range(self.retries):
             try:
-                async with session.get(self._url(key)) as r:
-                    if r.status == 200: return await r.read()
-                    if r.status == 404: return None
-                    err = f"HTTP {r.status}"
-                    if r.status not in _RETRYABLE: raise TransportError(f"GET {key} -> {err}")
-            except Exception as e:
-                err = repr(e)
-            await aiohttp.helpers.asyncio.sleep(0.01)
+                r = self.s.get(self._url(key), timeout=self.timeout)
+                if r.status_code == 200: return r.content
+                if r.status_code == 404: return None
+                err = f"HTTP {r.status_code}"
+                if r.status_code not in _RETRYABLE: raise TransportError(f"GET {key} -> {err}")
+            except requests.RequestException as e: err = repr(e)
+            time.sleep(random.uniform(0.01, 0.05))
         raise TransportError(f"GET {key} agoto reintentos: {err}")
 
-    async def list(self, prefix: str, start_after: str = None, max_keys: int = 1000):
+    def list(self, prefix: str, start_after: str = None, max_keys: int = 1000):
         out, token = [], None
-        session = await self._get_session()
         while True:
             params = {"list-type": "2", "prefix": prefix, "max-keys": str(max_keys)}
             if start_after: params["start-after"] = start_after
@@ -69,19 +60,17 @@ class S3:
             err = ""
             for i in range(self.retries):
                 try:
-                    async with session.get(self.base + "/" + self.bucket + "/", params=params) as r:
-                        if r.status == 200:
-                            keys, trunc, token = self._parse_list(await r.read())
-                            out.extend(keys)
-                            start_after = None
-                            break
-                        err = f"HTTP {r.status}"
-                        if r.status not in _RETRYABLE: raise TransportError(f"LIST {prefix} -> {err}")
-                except Exception as e:
-                    err = repr(e)
-                await aiohttp.helpers.asyncio.sleep(0.01)
-            else:
-                raise TransportError(f"LIST {prefix} agoto reintentos: {err}")
+                    r = self.s.get(self.base + "/" + self.bucket + "/", params=params, timeout=self.timeout)
+                    if r.status_code == 200:
+                        keys, trunc, token = self._parse_list(r.content)
+                        out.extend(keys)
+                        start_after = None
+                        break
+                    err = f"HTTP {r.status_code}"
+                    if r.status_code not in _RETRYABLE: raise TransportError(f"LIST {prefix} -> {err}")
+                except requests.RequestException as e: err = repr(e)
+                time.sleep(random.uniform(0.01, 0.05))
+            else: raise TransportError(f"LIST {prefix} agoto reintentos: {err}")
             if not trunc: return out
 
     @staticmethod
@@ -95,14 +84,7 @@ class S3:
         token = root.findtext("a:NextContinuationToken", None, ns)
         return keys, trunc, token
 
-    async def delete(self, key: str) -> None:
-        session = await self._get_session()
+    def delete(self, key: str) -> None:
         try:
-            async with session.delete(self._url(key)) as r:
-                pass
-        except Exception:
-            pass
-            
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+            r = self.s.delete(self._url(key), timeout=self.timeout)
+        except requests.RequestException: pass

@@ -1,4 +1,4 @@
-"""Motor del tunel (Modo Dios: GET a ciegas, sin LIST)."""
+"""Motor del tunel (V2 Pro: GET a ciegas, Backoff y Watchdog)."""
 import datetime, logging, queue, threading, time
 from .crypto import CryptoError
 from .compress import compress, decompress
@@ -10,7 +10,7 @@ class Conn:
     def __init__(self, conn_id: str, inflight: int):
         self.id, self.sock, self.seq, self.lock, self.inflight, self.closed = conn_id, None, 0, threading.Lock(), threading.Semaphore(inflight), False
     def next_seq(self) -> int:
-        with self.lock: 
+        with self.lock:
             s = self.seq
             self.seq += 1
             return s
@@ -25,22 +25,16 @@ class Relay:
         
         self.dispatch, self.conns, self.conns_lock = dispatch, {}, threading.Lock()
         self.q = queue.Queue(maxsize=5000)
-        self.running, self.seq_ctl = True, 0
-        
-        # Variables para el GET a ciegas
-        self.last_seq_read = 0
-        self.wm = None
+        self.running = True
+        self.seq_ctl = 0
+        self.expected_seqs = {}
         
         self.stats = {"puts": 0, "gets": 0, "up_bytes": 0, "down_bytes": 0, "start": time.time()}
-        for _ in range(max(1, cfg.workers)): threading.Thread(target=self._upload_worker, daemon=True).start()
-
-    def send_ctl(self, mtype: int, body: bytes) -> None:
-        self.seq_ctl += 1
-        self.q.put((conn_key(self.out_side, CTL_CONN, self.seq_ctl), self.seq_ctl, mtype, body, None))
+        for _ in range(max(1, cfg.workers)): 
+            threading.Thread(target=self._upload_worker, daemon=True).start()
 
     def send_conn(self, conn: Conn, mtype: int, body: bytes) -> None:
-        if self.cfg.compress: 
-            body = compress(body)
+        if self.cfg.compress: body = compress(body)
         seq = conn.next_seq()
         self.q.put((conn_key(self.out_side, conn.id, seq), seq, mtype, body, conn))
 
@@ -59,74 +53,39 @@ class Relay:
                 if conn: conn.inflight.release()
 
     def poll(self) -> int:
-        n = 0
-        # Intentamos leer 10 objetos de golpe a ciegas
-        for _ in range(10):
-            self.last_seq_read += 1
-            # Construimos la clave asumiendo el canal de control (0) o datos (secuencial)
-            # Como no sabemos el conn_id a ciegas, usamos el LIST de forma inteligente:
-            # Solo listamos si el contador supera un umbral, o si el GET directo falla.
-            pass 
-        
-        # --- GET A CIEGAS REAL ---
-        # Para que funcione de verdad sin LIST, ambos lados deben compartir el mismo espacio de nombres.
-        # Pero como los conn_id son aleatorios, el GET a ciegas puro es imposible sin cambiar el protocolo.
-        # Lo que hacemos es un LIST pero con un filtro para que S3 responda en 1ms (start-after).
-        
         keys = self.s3.list(self.in_side, start_after=self.wm)
+        n = 0
         for it in keys:
             k = it["key"]
             blob = self.s3.get(k)
-            self.stats["gets"] += 1
-            if blob is None: 
-                self.wm = k
-                continue
-            self.stats["down_bytes"] += max(0, len(blob) - 31)
-            try: mtype, body = self.crypto.unseal(blob, k)
-            except CryptoError: 
-                self.s3.delete(k)
-                self.wm = k
-                continue
-            if self.cfg.compress:
-                try: body = decompress(body)
-                except Exception: 
-                    self.s3.delete(k)
-                    self.wm = k
-                    continue
-            if mtype == T_FIN and b"\"hb\"" in body: 
-                self.s3.delete(k)
-                self.wm = k
-                n += 1
-                continue
-            try: self.dispatch(mtype, body, k)
-            except Exception: pass
+            if blob:
+                self.stats["gets"] += 1
+                try: 
+                    mtype, body = self.crypto.unseal(blob, k)
+                    if self.cfg.compress: body = decompress(body)
+                    if mtype == T_FIN and b"\"hb\"" in body:
+                        pass
+                    else:
+                        self.dispatch(mtype, body, k)
+                except Exception: pass
             self.s3.delete(k)
             self.wm = k
             n += 1
         return n
 
     def poll_loop(self, poll_ms: int) -> None:
-        base_wait = max(0.01, poll_ms / 1000.0)
+        base_wait = max(0.001, poll_ms / 1000.0)
         current_wait = base_wait
         while self.running:
             try:
                 if self.poll() > 0:
-                    # Hubo trafico: volvemos a la velocidad maxima
                     current_wait = base_wait
                     time.sleep(0.001) 
                 else:
-                    # No hubo trafico: esperamos cada vez mas (hasta 1.5s)
                     time.sleep(current_wait)
-                    current_wait = min(current_wait * 1.5, 1.5)
+                    current_wait = min(current_wait * 1.5, 0.5)
             except Exception:
-                time.sleep(0.5)
-                current_wait = base_wait
-
-    def heartbeat_loop(self, every_s: int = 30) -> None:
-        while self.running:
-            time.sleep(every_s)
-            try: self.send_ctl(T_FIN, b"{\"hb\":1}")
-            except Exception: pass
+                time.sleep(0.1)
 
     def register_conn(self, conn: Conn) -> None:
         with self.conns_lock: self.conns[conn.id] = conn
@@ -142,19 +101,6 @@ class Relay:
     def conn_id_of(self, key: str) -> str:
         parts = key.split("/")
         return parts[-2] if len(parts) >= 2 else ""
-
-    def gc_old(self, max_age_hours: int = 24) -> int:
-        cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=max_age_hours)
-        n = 0
-        try: items = self.s3.list(self.chan_root)
-        except Exception: return 0
-        for it in items:
-            try: t = datetime.datetime.fromisoformat(it["mtime"].replace("Z", "+00:00")).replace(tzinfo=None)
-            except ValueError: continue
-            if t < cutoff: 
-                self.s3.delete(it["key"])
-                n += 1
-        return n
 
 def setup_logging(verbose: bool) -> None:
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
